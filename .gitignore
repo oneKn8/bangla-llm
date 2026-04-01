@@ -1,0 +1,26 @@
+# Python
+.venv/
+__pycache__/
+*.pyc
+*.egg-info/
+
+# Model checkpoints (large binary files)
+training/checkpoints/
+training/data/
+
+# Tokenizer output (binary)
+tokenizer/output/
+
+# Data pipeline raw/processed data
+data-pipeline/data/
+data-pipeline/*.db
+
+# SFT data (generated)
+finetune/data/
+finetune/output/
+
+# Misc
+*.log
+.DS_Store
+*.bin
+*.safetensors
