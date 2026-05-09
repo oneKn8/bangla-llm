@@ -99,20 +99,27 @@ class TokenDataset(IterableDataset):
         token_file: str | Path,
         seq_len: int = 2048,
         epoch: int = 0,
+        start_token: int = 0,
+        end_token: int | None = None,
+        shuffle: bool = True,
     ) -> None:
         super().__init__()
         self.token_file = Path(token_file)
         self.seq_len = seq_len
         self.epoch = epoch
+        self.start_token = max(0, start_token)
+        self.shuffle = shuffle
 
         # Memory-map the file as uint16
         self.tokens = np.memmap(
             self.token_file, dtype=np.uint16, mode="r",
         )
         self.n_tokens = len(self.tokens)
+        self.end_token = self.n_tokens if end_token is None else min(end_token, self.n_tokens)
+        self.slice_n_tokens = max(0, self.end_token - self.start_token)
 
         # We need seq_len + 1 tokens per sample (input + 1 shifted label)
-        self.n_sequences = max(0, (self.n_tokens - 1) // self.seq_len)
+        self.n_sequences = max(0, (self.slice_n_tokens - 1) // self.seq_len)
 
     def __len__(self) -> int:
         """Approximate number of sequences in the dataset."""
@@ -120,15 +127,27 @@ class TokenDataset(IterableDataset):
 
     def __iter__(self):
         """Yield (input_ids, labels) pairs with epoch-based offset shuffling."""
-        # Compute a deterministic random offset for this epoch
+        if self.slice_n_tokens <= self.seq_len:
+            return
+
+        # Compute a deterministic random offset for this epoch.
         rng = np.random.RandomState(seed=self.epoch)
-        offset = rng.randint(0, min(self.seq_len, self.n_tokens))
+        if self.shuffle:
+            offset = rng.randint(0, min(self.seq_len, self.slice_n_tokens))
+        else:
+            offset = 0
 
-        # Generate all valid start indices from the offset
-        starts = list(range(offset, self.n_tokens - self.seq_len, self.seq_len))
+        # Generate all valid start indices from the offset.
+        starts = list(
+            range(
+                self.start_token + offset,
+                self.end_token - self.seq_len,
+                self.seq_len,
+            )
+        )
 
-        # Shuffle the order of sequences within the epoch
-        rng.shuffle(starts)
+        if self.shuffle:
+            rng.shuffle(starts)
 
         for start in starts:
             # Read seq_len + 1 tokens: first seq_len are input, last seq_len are labels

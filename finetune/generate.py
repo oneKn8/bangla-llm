@@ -28,7 +28,9 @@ import sys
 from pathlib import Path
 
 import torch
-from transformers import AutoModelForCausalLM, AutoTokenizer, PreTrainedTokenizerBase
+from transformers import AutoModelForCausalLM, PreTrainedTokenizerBase
+
+from bangla_tokenizer import load_bangla_tokenizer
 
 logging.basicConfig(
     level=logging.INFO,
@@ -64,7 +66,7 @@ def _load_lora_model(
         sys.exit(1)
 
     logger.info("Loading base model: %s", base_model_name)
-    tokenizer = AutoTokenizer.from_pretrained(str(model_path), trust_remote_code=True)
+    tokenizer = load_bangla_tokenizer(str(model_path))
     if tokenizer.pad_token is None:
         tokenizer.pad_token = tokenizer.eos_token
 
@@ -92,7 +94,7 @@ def _load_full_model(
 ) -> tuple[AutoModelForCausalLM, PreTrainedTokenizerBase]:
     """Load a full (non-LoRA) fine-tuned model."""
     logger.info("Loading full model from: %s", model_path)
-    tokenizer = AutoTokenizer.from_pretrained(str(model_path), trust_remote_code=True)
+    tokenizer = load_bangla_tokenizer(str(model_path))
     if tokenizer.pad_token is None:
         tokenizer.pad_token = tokenizer.eos_token
 

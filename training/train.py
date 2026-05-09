@@ -13,6 +13,7 @@ Usage:
 from __future__ import annotations
 
 import argparse
+import json
 import math
 import sys
 import time
@@ -70,8 +71,14 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--warmup-steps",
         type=int,
-        default=2000,
-        help="Linear warmup steps (default: 2000).",
+        default=None,
+        help="Linear warmup steps. Overrides --warmup-ratio when set.",
+    )
+    parser.add_argument(
+        "--warmup-ratio",
+        type=float,
+        default=0.05,
+        help="Warmup as a fraction of total optimizer steps (default: 0.05).",
     )
     parser.add_argument(
         "--save-every",
@@ -91,6 +98,24 @@ def parse_args() -> argparse.Namespace:
         default=None,
         help="Path to checkpoint directory to resume from.",
     )
+    parser.add_argument(
+        "--eval-ratio",
+        type=float,
+        default=0.01,
+        help="Reserve the tail of the token stream as a held-out eval slice (default: 0.01). Set 0 to disable.",
+    )
+    parser.add_argument(
+        "--eval-every",
+        type=int,
+        default=250,
+        help="Run held-out eval every N optimizer steps (default: 250).",
+    )
+    parser.add_argument(
+        "--eval-max-batches",
+        type=int,
+        default=32,
+        help="Maximum eval batches per evaluation pass (default: 32).",
+    )
     return parser.parse_args()
 
 
@@ -99,6 +124,46 @@ def build_model(cfg: BanglaLLMConfig) -> LlamaForCausalLM:
     hf_config = cfg.to_hf_config()
     model = LlamaForCausalLM(hf_config)
     return model
+
+
+@torch.no_grad()
+def run_eval(
+    model: LlamaForCausalLM,
+    dataloader: DataLoader | None,
+    accelerator: Accelerator,
+    max_batches: int,
+) -> dict[str, float] | None:
+    """Evaluate on a held-out token slice without blowing out run time."""
+    if dataloader is None:
+        return None
+
+    model.eval()
+    losses: list[float] = []
+
+    for batch_idx, batch in enumerate(dataloader):
+        if batch_idx >= max_batches:
+            break
+
+        outputs = model(
+            input_ids=batch["input_ids"],
+            labels=batch["labels"],
+        )
+        loss = outputs.loss.detach().float()
+        reduced_loss = accelerator.gather_for_metrics(loss.unsqueeze(0)).mean().item()
+        losses.append(reduced_loss)
+
+    model.train()
+
+    if not losses:
+        return None
+
+    mean_loss = sum(losses) / len(losses)
+    perplexity = math.exp(min(mean_loss, 20.0))
+    return {
+        "loss": mean_loss,
+        "perplexity": perplexity,
+        "batches": float(len(losses)),
+    }
 
 
 def main() -> None:
@@ -143,17 +208,32 @@ def main() -> None:
 
     file_size = token_file.stat().st_size
     total_tokens = file_size // 2  # uint16 = 2 bytes per token
-    seqs_per_epoch = max(1, (total_tokens - 1) // args.seq_len)
+    raw_eval_tokens = int(total_tokens * max(args.eval_ratio, 0.0))
+    min_eval_tokens = args.seq_len + 1
+    eval_tokens = raw_eval_tokens if raw_eval_tokens >= min_eval_tokens else 0
+    train_tokens = total_tokens - eval_tokens
+    if train_tokens <= args.seq_len:
+        accelerator.print("ERROR: Not enough tokens left for training after eval split.")
+        sys.exit(1)
+
+    seqs_per_epoch = max(1, (train_tokens - 1) // args.seq_len)
     steps_per_epoch = math.ceil(
         seqs_per_epoch / (args.batch_size * args.grad_accum * accelerator.num_processes)
     )
     total_steps = steps_per_epoch * args.epochs
+    warmup_steps = (
+        args.warmup_steps
+        if args.warmup_steps is not None
+        else max(1, int(total_steps * args.warmup_ratio))
+    )
     effective_batch_tokens = (
         args.batch_size * args.grad_accum * accelerator.num_processes * args.seq_len
     )
 
     accelerator.print(f"Token file: {token_file}")
     accelerator.print(f"Total tokens: {total_tokens:,}")
+    accelerator.print(f"Train tokens: {train_tokens:,}")
+    accelerator.print(f"Eval tokens: {eval_tokens:,}")
     accelerator.print(f"Sequences per epoch: {seqs_per_epoch:,}")
     accelerator.print(f"Steps per epoch: {steps_per_epoch:,}")
     accelerator.print(f"Total steps: {total_steps:,}")
@@ -161,17 +241,78 @@ def main() -> None:
     accelerator.print(f"Effective batch tokens: {effective_batch_tokens:,}")
     accelerator.print(f"Epochs: {args.epochs}")
     accelerator.print(f"Peak LR: {args.lr}")
-    accelerator.print(f"Warmup steps: {args.warmup_steps}")
+    accelerator.print(f"Warmup steps: {warmup_steps}")
 
     # --- Scheduler ---
     scheduler = get_cosine_schedule_with_warmup(
         optimizer,
-        num_warmup_steps=args.warmup_steps,
+        num_warmup_steps=warmup_steps,
         num_training_steps=total_steps,
     )
 
     # --- Prepare with Accelerate (model, optimizer, scheduler) ---
     model, optimizer, scheduler = accelerator.prepare(model, optimizer, scheduler)
+
+    def build_loader(*, epoch: int, start_token: int, end_token: int, shuffle: bool) -> DataLoader:
+        dataset = TokenDataset(
+            token_file=args.tokens,
+            seq_len=args.seq_len,
+            epoch=epoch,
+            start_token=start_token,
+            end_token=end_token,
+            shuffle=shuffle,
+        )
+        dataloader = DataLoader(
+            dataset,
+            batch_size=args.batch_size,
+            num_workers=0,
+            pin_memory=True,
+        )
+        return accelerator.prepare(dataloader)
+
+    eval_dataloader = None
+    if eval_tokens:
+        eval_dataloader = build_loader(
+            epoch=0,
+            start_token=train_tokens,
+            end_token=total_tokens,
+            shuffle=False,
+        )
+
+    best_eval_loss: float | None = None
+
+    def save_metadata(
+        save_dir: Path,
+        *,
+        global_step: int,
+        epoch: int,
+        avg_loss: float | None = None,
+        eval_metrics: dict[str, float] | None = None,
+    ) -> None:
+        if not accelerator.is_main_process:
+            return
+
+        payload = {
+            "global_step": global_step,
+            "epoch": epoch,
+            "learning_rate": scheduler.get_last_lr()[0],
+            "avg_train_loss": avg_loss,
+            "eval": eval_metrics,
+        }
+        (save_dir / "training_state.json").write_text(
+            json.dumps(payload, ensure_ascii=False, indent=2),
+            encoding="utf-8",
+        )
+
+    initial_eval = run_eval(model, eval_dataloader, accelerator, args.eval_max_batches)
+    if initial_eval is not None:
+        accelerator.print(
+            "Initial eval: "
+            f"loss={initial_eval['loss']:.4f} "
+            f"ppl={initial_eval['perplexity']:.2f} "
+            f"batches={int(initial_eval['batches'])}"
+        )
+        best_eval_loss = initial_eval["loss"]
 
     # --- Training loop ---
     global_step = 0
@@ -180,18 +321,12 @@ def main() -> None:
     for epoch in range(args.epochs):
         accelerator.print(f"\n--- Epoch {epoch + 1}/{args.epochs} ---")
 
-        dataset = TokenDataset(
-            token_file=args.tokens,
-            seq_len=args.seq_len,
+        dataloader = build_loader(
             epoch=epoch,
+            start_token=0,
+            end_token=train_tokens,
+            shuffle=True,
         )
-        dataloader = DataLoader(
-            dataset,
-            batch_size=args.batch_size,
-            num_workers=0,
-            pin_memory=True,
-        )
-        dataloader = accelerator.prepare(dataloader)
 
         model.train()
         epoch_loss_sum = 0.0
@@ -232,6 +367,21 @@ def main() -> None:
                         f"tokens={tokens_seen:,} elapsed={elapsed:.0f}s"
                     )
 
+                if eval_dataloader is not None and global_step % args.eval_every == 0:
+                    eval_metrics = run_eval(
+                        model,
+                        eval_dataloader,
+                        accelerator,
+                        args.eval_max_batches,
+                    )
+                    if eval_metrics is not None:
+                        accelerator.print(
+                            "  eval "
+                            f"step={global_step} "
+                            f"loss={eval_metrics['loss']:.4f} "
+                            f"ppl={eval_metrics['perplexity']:.2f}"
+                        )
+
                 # Save periodic checkpoint
                 if global_step % args.save_every == 0:
                     ckpt_dir = output_dir / f"step-{global_step}"
@@ -242,6 +392,12 @@ def main() -> None:
                         ckpt_dir,
                         save_function=accelerator.save,
                     )
+                    save_metadata(
+                        ckpt_dir,
+                        global_step=global_step,
+                        epoch=epoch + 1,
+                        avg_loss=epoch_loss_sum / max(epoch_micro_steps, 1),
+                    )
 
         # --- End of epoch ---
         avg_epoch_loss = epoch_loss_sum / max(epoch_micro_steps, 1)
@@ -251,6 +407,14 @@ def main() -> None:
             f"Global step: {global_step}"
         )
 
+        epoch_eval = run_eval(model, eval_dataloader, accelerator, args.eval_max_batches)
+        if epoch_eval is not None:
+            accelerator.print(
+                f"  Eval after epoch {epoch + 1}: "
+                f"loss={epoch_eval['loss']:.4f} "
+                f"ppl={epoch_eval['perplexity']:.2f}"
+            )
+
         epoch_ckpt_dir = output_dir / f"epoch-{epoch + 1}"
         accelerator.print(f"  Saving epoch checkpoint: {epoch_ckpt_dir}")
         accelerator.wait_for_everyone()
@@ -259,6 +423,34 @@ def main() -> None:
             epoch_ckpt_dir,
             save_function=accelerator.save,
         )
+        save_metadata(
+            epoch_ckpt_dir,
+            global_step=global_step,
+            epoch=epoch + 1,
+            avg_loss=avg_epoch_loss,
+            eval_metrics=epoch_eval,
+        )
+
+        if (
+            epoch_eval is not None
+            and (best_eval_loss is None or epoch_eval["loss"] < best_eval_loss)
+        ):
+            best_eval_loss = epoch_eval["loss"]
+            best_dir = output_dir / "best"
+            accelerator.print(f"  New best checkpoint: {best_dir}")
+            accelerator.wait_for_everyone()
+            unwrapped = accelerator.unwrap_model(model)
+            unwrapped.save_pretrained(
+                best_dir,
+                save_function=accelerator.save,
+            )
+            save_metadata(
+                best_dir,
+                global_step=global_step,
+                epoch=epoch + 1,
+                avg_loss=avg_epoch_loss,
+                eval_metrics=epoch_eval,
+            )
 
     # --- Save final model ---
     final_dir = output_dir / "final"
@@ -268,6 +460,14 @@ def main() -> None:
     unwrapped.save_pretrained(
         final_dir,
         save_function=accelerator.save,
+    )
+    final_eval = run_eval(model, eval_dataloader, accelerator, args.eval_max_batches)
+    save_metadata(
+        final_dir,
+        global_step=global_step,
+        epoch=args.epochs,
+        avg_loss=avg_epoch_loss,
+        eval_metrics=final_eval,
     )
 
     total_time = time.time() - start_time

@@ -1,0 +1,10 @@
+data/raw/
+data/processed/
+data/state/
+data/final/
+*.xml.bz2
+*.bin
+lid.176.bin
+__pycache__/
+*.pyc
+.env

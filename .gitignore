@@ -1,26 +1,55 @@
 # Python
 .venv/
+venv/
 __pycache__/
 *.pyc
+*.pyo
 *.egg-info/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
 
-# Model checkpoints (large binary files)
+# Editors / agents
+.claude/
+.idea/
+.vscode/
+*.swp
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Large training artifacts (excluded from public repo)
+brev_artifacts/
+checkpoints/
 training/checkpoints/
 training/data/
-
-# Tokenizer output (binary)
-tokenizer/output/
-
-# Data pipeline raw/processed data
-data-pipeline/data/
-data-pipeline/*.db
-
-# SFT data (generated)
 finetune/data/
 finetune/output/
+tokenizer/output/
+data-pipeline/data/
+data-pipeline/*.db
+data-pipeline/seeds/
+data-pipeline/source ~/
+data-pipeline/colab_pipeline.ipynb
+data-pipeline/pipeline_code.tar.gz
+data-pipeline/venv/
+data-pipeline/__pycache__/
 
-# Misc
-*.log
-.DS_Store
+# Binary model files (release via Hugging Face, not git)
 *.bin
 *.safetensors
+*.gguf
+*.pt
+*.ckpt
+Modelfile
+
+# Logs
+*.log
+logs/
+
+# Secrets
+.env
+.env.*
+*.key
+*.pem
