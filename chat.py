@@ -56,10 +56,19 @@ def generate(model, tokenizer, prompt: str, device: str,
              repetition_penalty: float = 1.1) -> str:
     input_ids = tokenizer.encode(prompt, return_tensors="pt").to(device)
 
+    # Stop on </s> and, when present, the ChatML turn terminator <|im_end|>.
+    # generation_config only declares </s>=2, but SFT ends turns with <|im_end|>,
+    # so without this the chat path never halts and runs to max_new_tokens.
+    eos_ids = [tokenizer.eos_token_id]
+    im_end_id = tokenizer.convert_tokens_to_ids(CHATML_END)
+    if isinstance(im_end_id, int) and im_end_id != tokenizer.unk_token_id:
+        eos_ids.append(im_end_id)
+
     gen_kwargs = {
         "max_new_tokens": max_new_tokens,
         "pad_token_id": tokenizer.pad_token_id or tokenizer.eos_token_id,
         "repetition_penalty": repetition_penalty,
+        "eos_token_id": eos_ids,
     }
 
     if temperature > 0:

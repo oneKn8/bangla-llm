@@ -53,3 +53,17 @@ logs/
 .env.*
 *.key
 *.pem
+
+# Corpus data (multi-GB; released via Hugging Face / Drive, not git)
+corpus/data/
+fw2.json
+
+# Private research material (kept in a separate private repo, not this public one)
+WORK_QUEUE.md
+baseline-analysis/
+chorittro/
+corpus/audit_contamination.py
+corpus/audit_contamination_v2.py
+corpus/audit_v2_composition.py
+corpus/audit_v2_gold_validation.py
+corpus/audit_v2_lid_blindspot.py

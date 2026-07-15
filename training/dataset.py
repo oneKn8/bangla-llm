@@ -150,9 +150,12 @@ class TokenDataset(IterableDataset):
             rng.shuffle(starts)
 
         for start in starts:
-            # Read seq_len + 1 tokens: first seq_len are input, last seq_len are labels
-            chunk = self.tokens[start : start + self.seq_len + 1].astype(np.int64)
-            input_ids = torch.from_numpy(chunk[:-1].copy())
-            labels = torch.from_numpy(chunk[1:].copy())
+            # Read seq_len tokens. Labels are ALIGNED to input_ids (identical); the
+            # HF LlamaForCausalLM loss shifts once internally to build next-token
+            # targets. Do NOT pre-shift here -- pre-shifting double-shifts the
+            # objective so the model is trained to predict token i+2, not i+1.
+            chunk = self.tokens[start : start + self.seq_len].astype(np.int64)
+            input_ids = torch.from_numpy(chunk.copy())
+            labels = input_ids.clone()
 
             yield {"input_ids": input_ids, "labels": labels}

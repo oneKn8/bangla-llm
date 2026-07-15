@@ -40,6 +40,22 @@ CHATML_TOKENS = {
     "im_end": "<|im_end|>",
 }
 
+# ChatML template with {% generation %} markers so TRL's assistant_only_loss can
+# mask everything except assistant turns -- loss is computed on the completion
+# only, not on the (unpredictable) user/system prompt tokens.
+CHATML_CHAT_TEMPLATE = (
+    "{% for message in messages %}"
+    "{{ '<|im_start|>' + message['role'] + '\n' }}"
+    "{% if message['role'] == 'assistant' %}"
+    "{% generation %}{{ message['content'] + '<|im_end|>' }}{% endgeneration %}"
+    "{% else %}"
+    "{{ message['content'] + '<|im_end|>' }}"
+    "{% endif %}"
+    "{% if not loop.last %}{{ '\n' }}{% endif %}"
+    "{% endfor %}"
+    "{% if add_generation_prompt %}{{ '\n<|im_start|>assistant\n' }}{% endif %}"
+)
+
 
 def add_chatml_tokens(tokenizer: PreTrainedTokenizerBase) -> int:
     """Add ChatML special tokens if not present. Returns number added."""
@@ -107,6 +123,7 @@ def main():
     logger.info("Loading tokenizer from %s", sp_path)
     tokenizer = BanglaTokenizer(sp_model_path=str(sp_path))
     add_chatml_tokens(tokenizer)
+    tokenizer.chat_template = CHATML_CHAT_TEMPLATE
 
     # Load model
     logger.info("Loading model from %s", args.base_model)
@@ -152,7 +169,9 @@ def main():
         report_to="none",
         optim="adamw_torch",
         eval_strategy="epoch",
-        dataset_text_field="text",
+        # Train on completions only: the {% generation %} spans in the chat
+        # template mark assistant tokens; everything else is masked to -100.
+        assistant_only_loss=True,
     )
 
     trainer = SFTTrainer(
