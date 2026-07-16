@@ -150,12 +150,21 @@ def main() -> int:
     src.add_argument("--shards-dir", help="local dir containing <track>/ subdirs of .jsonl.gz")
     ap.add_argument("--tracks", nargs="+", default=["native", "codeswitch", "banglish"])
     ap.add_argument("--out", help="write enriched+deduped shards here (per track)")
-    ap.add_argument("--chars-per-tok", type=float, default=4.45, help="token estimate divisor")
+    ap.add_argument("--chars-per-tok", type=float, default=4.45, help="token estimate divisor (fallback when --tokenizer absent)")
+    ap.add_argument("--tokenizer", default=None,
+                    help="path to a SentencePiece .model for EXACT token counts "
+                         "(default: char/--chars-per-tok estimate)")
     ap.add_argument("--dedup", choices=["bloom", "exact", "none"], default="bloom",
                     help="bloom=fixed 256MB, OOM-proof (~0.1%% FP); exact=set, RAM grows; none")
     ap.add_argument("--report", default=None, help="write JSON report here")
     ap.add_argument("--progress-every", type=int, default=200_000)
     args = ap.parse_args()
+
+    sp = None
+    if args.tokenizer:
+        import sentencepiece as _spm
+        sp = _spm.SentencePieceProcessor(model_file=args.tokenizer)
+        print(f"exact token count via {args.tokenizer} (vocab {sp.vocab_size()})", flush=True)
 
     dedup = BloomDedup() if args.dedup == "bloom" else (ExactDedup() if args.dedup == "exact" else None)
     t0 = time.time()
@@ -195,7 +204,7 @@ def main() -> int:
                 continue
             n_unique += 1
             ps["kept"] += 1
-            toks = int(len(text) / args.chars_per_tok)
+            toks = len(sp.encode(nfc)) if sp is not None else int(len(text) / args.chars_per_tok)
             tok_unique += toks
             ps["tok"] += toks
             sc = sadhu_classify(text)
@@ -220,6 +229,7 @@ def main() -> int:
 
     dt = time.time() - t0
     report = {
+        "token_method": args.tokenizer or f"estimate char/{args.chars_per_tok}",
         "docs_read": n_total, "docs_unique": n_unique,
         "dup_rate_pct": round(100 * (n_total - n_unique) / max(1, n_total), 2),
         "unique_tokens_est": tok_unique, "unique_tokens_B": round(tok_unique / 1e9, 3),
