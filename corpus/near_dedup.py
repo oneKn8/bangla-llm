@@ -10,7 +10,7 @@ Pipeline (two-phase MinHash-LSH):
   1. Shingle each doc: NFC-normalize -> whitespace words -> word 5-grams -> xxh64 int.
   2. MinHash signature (128 perms), numpy-vectorized universal hash over a Mersenne
      prime P = 2**61-1. The signature array is a single uint32 [N,128] block.
-  3. LSH banding (b=16, r=8; collision threshold ~ (1/b)**(1/r) ~ 0.79): docs sharing
+  3. LSH banding (b=16, r=8; collision threshold ~ (1/b)**(1/r) = 2**-0.5 ~ 0.71): docs sharing
      any band bucket are candidate near-dupes.
   4. Union-find (rank + vectorized pointer-doubling) over within-bucket chains -> clusters.
   5. Keep one representative per cluster (highest SOURCE_PRIORITY, tie-break longest text);
