@@ -101,7 +101,7 @@ pip install \
     requests \
     wikiextractor \
     pyarrow \
-    fasttext-wheel \
+    fasttext-numpy2 \
     2>&1 | tail -5
 
 log "  Dependencies installed"
